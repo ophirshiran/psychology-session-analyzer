@@ -2,7 +2,10 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 
+from minio import Minio
+from minio.error import S3Error
 import pika
 
 
@@ -11,6 +14,15 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [transcription_worker] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def get_minio_client() -> Minio:
+    return Minio(
+        endpoint=os.getenv("MINIO_ENDPOINT", "minio:9000"),
+        access_key=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
+        secret_key=os.getenv("MINIO_SECRET_KEY", "minioadmin"),
+        secure=os.getenv("MINIO_SECURE", "false").lower() == "true",
+    )
 
 
 def get_connection() -> pika.BlockingConnection:
@@ -24,6 +36,15 @@ def get_connection() -> pika.BlockingConnection:
         credentials=credentials,
     )
     return pika.BlockingConnection(parameters)
+
+
+def download_audio(bucket_name: str, audio_object_name: str) -> str:
+    download_dir = Path(os.getenv("TRANSCRIPTION_WORKER_DOWNLOAD_DIR", "/tmp/transcription_worker"))
+    download_dir.mkdir(parents=True, exist_ok=True)
+    local_path = download_dir / Path(audio_object_name).name
+    client = get_minio_client()
+    client.fget_object(bucket_name, audio_object_name, str(local_path))
+    return str(local_path)
 
 
 def main() -> None:
@@ -45,7 +66,16 @@ def main() -> None:
             ) -> None:
                 payload = json.loads(body.decode("utf-8"))
                 logger.info("Received audio extracted event: %s", payload)
-                ch.basic_ack(delivery_tag=method.delivery_tag)
+                try:
+                    local_path = download_audio(
+                        bucket_name=payload["bucket"],
+                        audio_object_name=payload["audio_object_name"],
+                    )
+                    logger.info("Downloaded extracted audio to %s", local_path)
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                except (S3Error, KeyError) as exc:
+                    logger.error("Failed to download extracted audio: %s", exc)
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
             channel.basic_consume(queue=queue_name, on_message_callback=callback)
             channel.start_consuming()
