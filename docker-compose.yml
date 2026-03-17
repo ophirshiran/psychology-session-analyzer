@@ -2,8 +2,16 @@ services:
   upload_api:
     build: ./services/upload_api
     container_name: psychology-upload-api
+    depends_on:
+      - minio
     ports:
       - "8000:8000"
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: videos
+      MINIO_SECURE: "false"
     volumes:
       - ./services/upload_api:/app
 
