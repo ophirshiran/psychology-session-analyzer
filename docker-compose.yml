@@ -1,4 +1,12 @@
 services:
+  upload_api:
+    build: ./services/upload_api
+    container_name: psychology-upload-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./services/upload_api:/app
+
   rabbitmq:
     image: rabbitmq:3-management
     container_name: psychology-rabbitmq
