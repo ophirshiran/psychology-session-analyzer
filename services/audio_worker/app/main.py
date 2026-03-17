@@ -85,6 +85,30 @@ def upload_mp3(bucket_name: str, object_name: str, audio_path: str) -> None:
     )
 
 
+def publish_audio_extracted_event(
+    channel: pika.adapters.blocking_connection.BlockingChannel,
+    bucket_name: str,
+    source_object_name: str,
+    audio_object_name: str,
+    filename: str,
+) -> None:
+    queue_name = os.getenv("AUDIO_EXTRACTED_QUEUE", "audio_extracted")
+    payload = {
+        "event_type": "audio.extracted",
+        "bucket": bucket_name,
+        "source_object_name": source_object_name,
+        "audio_object_name": audio_object_name,
+        "filename": filename,
+    }
+    channel.queue_declare(queue=queue_name, durable=True)
+    channel.basic_publish(
+        exchange="",
+        routing_key=queue_name,
+        body=json.dumps(payload),
+        properties=pika.BasicProperties(delivery_mode=2),
+    )
+
+
 def main() -> None:
     queue_name = os.getenv("VIDEO_UPLOADED_QUEUE", "video_uploaded")
 
@@ -126,6 +150,14 @@ def main() -> None:
                         payload["bucket"],
                         audio_object_name,
                     )
+                    publish_audio_extracted_event(
+                        channel=ch,
+                        bucket_name=payload["bucket"],
+                        source_object_name=payload["object_name"],
+                        audio_object_name=audio_object_name,
+                        filename=payload["filename"],
+                    )
+                    logger.info("Published audio.extracted event for '%s'", audio_object_name)
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                 except (S3Error, KeyError, subprocess.CalledProcessError) as exc:
                     logger.error("Failed to process source video: %s", exc)
