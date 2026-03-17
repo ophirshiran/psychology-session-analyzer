@@ -4,6 +4,7 @@ services:
     container_name: psychology-upload-api
     depends_on:
       - minio
+      - rabbitmq
     ports:
       - "8000:8000"
     environment:
@@ -12,6 +13,11 @@ services:
       MINIO_SECRET_KEY: minioadmin
       MINIO_BUCKET: videos
       MINIO_SECURE: "false"
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      VIDEO_UPLOADED_QUEUE: video_uploaded
     volumes:
       - ./services/upload_api:/app
 
