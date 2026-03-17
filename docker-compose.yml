@@ -38,6 +38,7 @@ services:
       MINIO_SECRET_KEY: minioadmin
       MINIO_SECURE: "false"
       AUDIO_WORKER_DOWNLOAD_DIR: /tmp/audio_worker
+      AUDIO_WORKER_OUTPUT_DIR: /tmp/audio_worker_output
     volumes:
       - ./services/audio_worker:/app
 

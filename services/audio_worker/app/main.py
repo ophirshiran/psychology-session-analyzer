@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -47,6 +48,43 @@ def download_video(bucket_name: str, object_name: str, filename: str) -> str:
     return str(local_path)
 
 
+def extract_mp3(video_path: str, source_object_name: str) -> tuple[str, str]:
+    output_dir = Path(os.getenv("AUDIO_WORKER_OUTPUT_DIR", "/tmp/audio_worker_output"))
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    audio_filename = f"{Path(source_object_name).stem}.mp3"
+    audio_path = output_dir / audio_filename
+    audio_object_name = f"audio/{audio_filename}"
+
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            video_path,
+            "-vn",
+            "-acodec",
+            "libmp3lame",
+            str(audio_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    return str(audio_path), audio_object_name
+
+
+def upload_mp3(bucket_name: str, object_name: str, audio_path: str) -> None:
+    client = get_minio_client()
+    client.fput_object(
+        bucket_name=bucket_name,
+        object_name=object_name,
+        file_path=audio_path,
+        content_type="audio/mpeg",
+    )
+
+
 def main() -> None:
     queue_name = os.getenv("VIDEO_UPLOADED_QUEUE", "video_uploaded")
 
@@ -73,9 +111,24 @@ def main() -> None:
                         filename=payload["filename"],
                     )
                     logger.info("Downloaded source video to %s", local_path)
+                    audio_path, audio_object_name = extract_mp3(
+                        video_path=local_path,
+                        source_object_name=payload["object_name"],
+                    )
+                    logger.info("Extracted mp3 to %s", audio_path)
+                    upload_mp3(
+                        bucket_name=payload["bucket"],
+                        object_name=audio_object_name,
+                        audio_path=audio_path,
+                    )
+                    logger.info(
+                        "Uploaded extracted mp3 to bucket '%s' as '%s'",
+                        payload["bucket"],
+                        audio_object_name,
+                    )
                     ch.basic_ack(delivery_tag=method.delivery_tag)
-                except (S3Error, KeyError) as exc:
-                    logger.error("Failed to download source video: %s", exc)
+                except (S3Error, KeyError, subprocess.CalledProcessError) as exc:
+                    logger.error("Failed to process source video: %s", exc)
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
             channel.basic_consume(queue=queue_name, on_message_callback=callback)
