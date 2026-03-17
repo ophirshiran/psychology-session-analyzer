@@ -43,6 +43,20 @@ services:
     volumes:
       - ./services/audio_worker:/app
 
+  transcription_worker:
+    build: ./services/transcription_worker
+    container_name: psychology-transcription-worker
+    depends_on:
+      - rabbitmq
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      AUDIO_EXTRACTED_QUEUE: audio_extracted
+    volumes:
+      - ./services/transcription_worker:/app
+
   rabbitmq:
     image: rabbitmq:3-management
     container_name: psychology-rabbitmq
