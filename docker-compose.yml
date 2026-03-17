@@ -21,6 +21,20 @@ services:
     volumes:
       - ./services/upload_api:/app
 
+  audio_worker:
+    build: ./services/audio_worker
+    container_name: psychology-audio-worker
+    depends_on:
+      - rabbitmq
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      VIDEO_UPLOADED_QUEUE: video_uploaded
+    volumes:
+      - ./services/audio_worker:/app
+
   rabbitmq:
     image: rabbitmq:3-management
     container_name: psychology-rabbitmq
