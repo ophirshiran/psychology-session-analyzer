@@ -26,12 +26,18 @@ services:
     container_name: psychology-audio-worker
     depends_on:
       - rabbitmq
+      - minio
     environment:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: "5672"
       RABBITMQ_USER: guest
       RABBITMQ_PASSWORD: guest
       VIDEO_UPLOADED_QUEUE: video_uploaded
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_SECURE: "false"
+      AUDIO_WORKER_DOWNLOAD_DIR: /tmp/audio_worker
     volumes:
       - ./services/audio_worker:/app
 
