@@ -95,6 +95,27 @@ services:
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
 
+  redis:
+    image: redis:7-alpine
+    container_name: psychology-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: psychology-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: psychology
+      POSTGRES_USER: psychology
+      POSTGRES_PASSWORD: psychology
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   minio:
     image: minio/minio:latest
     container_name: psychology-minio
@@ -110,3 +131,5 @@ services:
 
 volumes:
   minio_data:
+  postgres_data:
+  redis_data:
