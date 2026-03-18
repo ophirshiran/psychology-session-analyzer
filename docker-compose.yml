@@ -94,6 +94,27 @@ services:
     volumes:
       - ./services/analysis_worker:/app
 
+  query_api:
+    build: ./services/query_api
+    container_name: psychology-query-api
+    depends_on:
+      - postgres
+      - minio
+    ports:
+      - "8001:8000"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: psychology
+      POSTGRES_USER: psychology
+      POSTGRES_PASSWORD: psychology
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_SECURE: "false"
+    volumes:
+      - ./services/query_api:/app
+
   rabbitmq:
     image: rabbitmq:3-management
     container_name: psychology-rabbitmq
