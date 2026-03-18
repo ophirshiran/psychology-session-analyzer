@@ -70,12 +70,18 @@ services:
     container_name: psychology-analysis-worker
     depends_on:
       - rabbitmq
+      - minio
     environment:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: "5672"
       RABBITMQ_USER: guest
       RABBITMQ_PASSWORD: guest
       TRANSCRIPT_CREATED_QUEUE: transcript_created
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_SECURE: "false"
+      ANALYSIS_WORKER_DOWNLOAD_DIR: /tmp/analysis_worker
     volumes:
       - ./services/analysis_worker:/app
 

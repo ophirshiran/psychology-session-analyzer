@@ -2,7 +2,10 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 
+from minio import Minio
+from minio.error import S3Error
 import pika
 
 
@@ -11,6 +14,15 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [analysis_worker] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def get_minio_client() -> Minio:
+    return Minio(
+        endpoint=os.getenv("MINIO_ENDPOINT", "minio:9000"),
+        access_key=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
+        secret_key=os.getenv("MINIO_SECRET_KEY", "minioadmin"),
+        secure=os.getenv("MINIO_SECURE", "false").lower() == "true",
+    )
 
 
 def get_connection() -> pika.BlockingConnection:
@@ -24,6 +36,23 @@ def get_connection() -> pika.BlockingConnection:
         credentials=credentials,
     )
     return pika.BlockingConnection(parameters)
+
+
+def download_transcript(bucket_name: str, transcript_object_name: str) -> tuple[str, dict]:
+    download_dir = Path(os.getenv("ANALYSIS_WORKER_DOWNLOAD_DIR", "/tmp/analysis_worker"))
+    download_dir.mkdir(parents=True, exist_ok=True)
+    local_path = download_dir / Path(transcript_object_name).name
+    client = get_minio_client()
+    client.fget_object(bucket_name, transcript_object_name, str(local_path))
+    transcript = json.loads(local_path.read_text(encoding="utf-8"))
+    return str(local_path), transcript
+
+
+def log_transcript_preview(transcript: dict) -> None:
+    utterances = transcript.get("utterances") or []
+    logger.info("Transcript JSON loaded. Utterances count: %s", len(utterances))
+    if transcript.get("text"):
+        logger.info("Transcript JSON preview: %s", transcript["text"][:250])
 
 
 def main() -> None:
@@ -45,7 +74,17 @@ def main() -> None:
             ) -> None:
                 payload = json.loads(body.decode("utf-8"))
                 logger.info("Received transcript created event: %s", payload)
-                ch.basic_ack(delivery_tag=method.delivery_tag)
+                try:
+                    local_path, transcript = download_transcript(
+                        bucket_name=payload["bucket"],
+                        transcript_object_name=payload["transcript_object_name"],
+                    )
+                    logger.info("Downloaded transcript JSON to %s", local_path)
+                    log_transcript_preview(transcript)
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                except (S3Error, KeyError, json.JSONDecodeError, OSError) as exc:
+                    logger.error("Failed to process transcript JSON: %s", exc)
+                    ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
             channel.basic_consume(queue=queue_name, on_message_callback=callback)
             channel.start_consuming()
