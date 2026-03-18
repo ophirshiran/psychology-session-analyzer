@@ -73,6 +73,14 @@ class SpeakerRoles(TypedDict):
     reasoning: str
 
 
+class UtteranceTag(TypedDict):
+    speaker: str
+    speaker_role: str
+    text: str
+    topic: str
+    emotion: str
+
+
 def get_minio_client() -> Minio:
     return Minio(
         endpoint=os.getenv("MINIO_ENDPOINT", "minio:9000"),
@@ -203,6 +211,10 @@ def get_llm_roles_cache_key(transcript_object_name: str) -> str:
     return f"llm_roles:{transcript_object_name}"
 
 
+def get_llm_tags_cache_key(transcript_object_name: str) -> str:
+    return f"llm_tags:{transcript_object_name}"
+
+
 def load_cached_analysis(transcript_object_name: str) -> dict | None:
     cached_value = get_redis_client().get(get_analysis_cache_key(transcript_object_name))
     if not cached_value:
@@ -223,6 +235,17 @@ def load_cached_llm_roles(transcript_object_name: str) -> dict | None:
 
 def save_cached_llm_roles(transcript_object_name: str, roles: dict) -> None:
     get_redis_client().set(get_llm_roles_cache_key(transcript_object_name), json.dumps(roles))
+
+
+def load_cached_llm_tags(transcript_object_name: str) -> list[dict] | None:
+    cached_value = get_redis_client().get(get_llm_tags_cache_key(transcript_object_name))
+    if not cached_value:
+        return None
+    return json.loads(cached_value)
+
+
+def save_cached_llm_tags(transcript_object_name: str, tags: list[dict]) -> None:
+    get_redis_client().set(get_llm_tags_cache_key(transcript_object_name), json.dumps(tags))
 
 
 def ensure_analysis_table_exists() -> None:
@@ -353,6 +376,91 @@ def identify_roles_with_gemini(transcript_object_name: str, transcript: dict) ->
     raise TemporaryGeminiAnalysisError(f"Gemini models unavailable: {last_error}")
 
 
+def build_llm_tag_prompt(transcript: dict, roles: dict) -> str:
+    utterances = transcript.get("utterances") or []
+    sample_lines = []
+    for utterance in utterances[:8]:
+        sample_lines.append(f"Speaker {utterance.get('speaker')}: {utterance.get('text', '')}")
+    joined_lines = "\n".join(sample_lines)
+    return (
+        "You are analyzing a psychology or therapy session transcript.\n"
+        "Tag only the transcript lines below.\n"
+        f"Speaker {roles.get('therapist_speaker')} is the therapist.\n"
+        f"Speaker {roles.get('patient_speaker')} is the patient.\n"
+        "Return only valid JSON as an array. Each item must have exactly these keys:\n"
+        '[{"speaker":"A","speaker_role":"therapist","text":"original utterance text","topic":"short topic","emotion":"single emotion word"}]\n'
+        "Keep topic short, 1 to 3 words. Keep emotion to one word when possible.\n"
+        "Transcript sample:\n"
+        f"{joined_lines}"
+    )
+
+
+def validate_llm_tags(raw_tags: object) -> list[dict]:
+    if not isinstance(raw_tags, list):
+        raise GeminiAnalysisError("Gemini tags response is not a JSON array")
+
+    validated_tags = []
+    for item in raw_tags:
+        if not isinstance(item, dict):
+            raise GeminiAnalysisError(f"Gemini tag item is not an object: {item}")
+        validated_item: UtteranceTag = {
+            "speaker": str(item.get("speaker", "")).strip(),
+            "speaker_role": str(item.get("speaker_role", "")).strip(),
+            "text": str(item.get("text", "")).strip(),
+            "topic": str(item.get("topic", "")).strip(),
+            "emotion": str(item.get("emotion", "")).strip(),
+        }
+        if not all(validated_item.values()):
+            raise GeminiAnalysisError(f"Gemini tag item is missing required fields: {item}")
+        validated_tags.append(dict(validated_item))
+    return validated_tags
+
+
+def tag_utterances_with_gemini(transcript_object_name: str, transcript: dict, roles: dict) -> list[dict]:
+    cached_tags = load_cached_llm_tags(transcript_object_name)
+    if cached_tags is not None:
+        logger.info("Using cached Gemini utterance tags for %s", transcript_object_name)
+        return cached_tags
+
+    client = get_gemini_client()
+    models_to_try = ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
+    last_error: Exception | None = None
+
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=build_llm_tag_prompt(transcript, roles),
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                ),
+            )
+            if not response.text:
+                raise GeminiAnalysisError("Gemini returned an empty tags response")
+            try:
+                tags = validate_llm_tags(json.loads(response.text))
+            except json.JSONDecodeError as exc:
+                raise GeminiAnalysisError(f"Gemini returned invalid tags JSON: {response.text}") from exc
+
+            save_cached_llm_tags(transcript_object_name, tags)
+            logger.info(
+                "Built and cached Gemini utterance tags for %s using %s",
+                transcript_object_name,
+                model_name,
+            )
+            return tags
+        except errors.APIError as exc:
+            last_error = exc
+            logger.warning("Gemini API error while tagging with model %s: %s", model_name, exc)
+            if getattr(exc, "status_code", None) and int(exc.status_code) >= 500:
+                continue
+            raise GeminiAnalysisError(f"Gemini API error while tagging: {exc}") from exc
+        except Exception as exc:
+            last_error = exc
+            raise GeminiAnalysisError(f"Gemini utterance tagging failed: {exc}") from exc
+    raise TemporaryGeminiAnalysisError(f"Gemini tagging models unavailable: {last_error}")
+
+
 def main() -> None:
     queue_name = os.getenv("TRANSCRIPT_CREATED_QUEUE", "transcript_created")
 
@@ -390,6 +498,15 @@ def main() -> None:
                     roles = identify_roles_with_gemini(payload["transcript_object_name"], transcript)
                     analysis["speaker_roles"] = roles
                     logger.info("Gemini role assignment: %s", roles)
+                    sample_tags = tag_utterances_with_gemini(
+                        payload["transcript_object_name"],
+                        transcript,
+                        roles,
+                    )
+                    analysis["sample_tags"] = sample_tags
+                    logger.info("Gemini sample tags count: %s", len(sample_tags))
+                    if sample_tags:
+                        logger.info("Gemini first sample tag: %s", sample_tags[0])
                     analysis_object_name = upload_analysis(
                         bucket_name=payload["bucket"],
                         transcript_object_name=payload["transcript_object_name"],
