@@ -9,6 +9,7 @@ from pathlib import Path
 from minio import Minio
 from minio.error import S3Error
 import pika
+import redis
 
 
 logging.basicConfig(
@@ -59,6 +60,14 @@ def get_minio_client() -> Minio:
         access_key=os.getenv("MINIO_ACCESS_KEY", "minioadmin"),
         secret_key=os.getenv("MINIO_SECRET_KEY", "minioadmin"),
         secure=os.getenv("MINIO_SECURE", "false").lower() == "true",
+    )
+
+
+def get_redis_client() -> redis.Redis:
+    return redis.Redis(
+        host=os.getenv("REDIS_HOST", "redis"),
+        port=int(os.getenv("REDIS_PORT", "6379")),
+        decode_responses=True,
     )
 
 
@@ -145,6 +154,21 @@ def upload_analysis(bucket_name: str, transcript_object_name: str, analysis: dic
     return analysis_object_name
 
 
+def get_analysis_cache_key(transcript_object_name: str) -> str:
+    return f"analysis:{transcript_object_name}"
+
+
+def load_cached_analysis(transcript_object_name: str) -> dict | None:
+    cached_value = get_redis_client().get(get_analysis_cache_key(transcript_object_name))
+    if not cached_value:
+        return None
+    return json.loads(cached_value)
+
+
+def save_cached_analysis(transcript_object_name: str, analysis: dict) -> None:
+    get_redis_client().set(get_analysis_cache_key(transcript_object_name), json.dumps(analysis))
+
+
 def main() -> None:
     queue_name = os.getenv("TRANSCRIPT_CREATED_QUEUE", "transcript_created")
 
@@ -171,8 +195,13 @@ def main() -> None:
                     )
                     logger.info("Downloaded transcript JSON to %s", local_path)
                     log_transcript_preview(transcript)
-                    analysis = build_basic_analysis(transcript)
-                    logger.info("Built basic analysis: %s", analysis["summary"])
+                    analysis = load_cached_analysis(payload["transcript_object_name"])
+                    if analysis is not None:
+                        logger.info("Using cached analysis for %s", payload["transcript_object_name"])
+                    else:
+                        analysis = build_basic_analysis(transcript)
+                        save_cached_analysis(payload["transcript_object_name"], analysis)
+                        logger.info("Built and cached basic analysis: %s", analysis["summary"])
                     analysis_object_name = upload_analysis(
                         bucket_name=payload["bucket"],
                         transcript_object_name=payload["transcript_object_name"],
@@ -180,7 +209,7 @@ def main() -> None:
                     )
                     logger.info("Uploaded analysis JSON to %s", analysis_object_name)
                     ch.basic_ack(delivery_tag=method.delivery_tag)
-                except (S3Error, KeyError, json.JSONDecodeError, OSError) as exc:
+                except (S3Error, KeyError, json.JSONDecodeError, OSError, redis.RedisError) as exc:
                     logger.error("Failed to process transcript JSON: %s", exc)
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 

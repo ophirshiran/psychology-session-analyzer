@@ -71,6 +71,7 @@ services:
     depends_on:
       - rabbitmq
       - minio
+      - redis
     environment:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: "5672"
@@ -82,6 +83,8 @@ services:
       MINIO_SECRET_KEY: minioadmin
       MINIO_SECURE: "false"
       ANALYSIS_WORKER_DOWNLOAD_DIR: /tmp/analysis_worker
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     volumes:
       - ./services/analysis_worker:/app
 
