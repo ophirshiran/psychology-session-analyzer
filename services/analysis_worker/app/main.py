@@ -5,7 +5,10 @@ import time
 from collections import Counter
 from io import BytesIO
 from pathlib import Path
+from typing import TypedDict
 
+from google import genai
+from google.genai import errors, types
 from minio import Minio
 from minio.error import S3Error
 import pika
@@ -55,6 +58,21 @@ STOPWORDS = {
 }
 
 
+class GeminiAnalysisError(Exception):
+    pass
+
+
+class TemporaryGeminiAnalysisError(Exception):
+    pass
+
+
+class SpeakerRoles(TypedDict):
+    therapist_speaker: str
+    patient_speaker: str
+    confidence: str
+    reasoning: str
+
+
 def get_minio_client() -> Minio:
     return Minio(
         endpoint=os.getenv("MINIO_ENDPOINT", "minio:9000"),
@@ -70,6 +88,17 @@ def get_redis_client() -> redis.Redis:
         port=int(os.getenv("REDIS_PORT", "6379")),
         decode_responses=True,
     )
+
+
+def get_gemini_api_key() -> str:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise GeminiAnalysisError("GEMINI_API_KEY is not set")
+    return api_key
+
+
+def get_gemini_client() -> genai.Client:
+    return genai.Client(api_key=get_gemini_api_key())
 
 
 def get_postgres_connection() -> psycopg.Connection:
@@ -170,6 +199,10 @@ def get_analysis_cache_key(transcript_object_name: str) -> str:
     return f"analysis:{transcript_object_name}"
 
 
+def get_llm_roles_cache_key(transcript_object_name: str) -> str:
+    return f"llm_roles:{transcript_object_name}"
+
+
 def load_cached_analysis(transcript_object_name: str) -> dict | None:
     cached_value = get_redis_client().get(get_analysis_cache_key(transcript_object_name))
     if not cached_value:
@@ -179,6 +212,17 @@ def load_cached_analysis(transcript_object_name: str) -> dict | None:
 
 def save_cached_analysis(transcript_object_name: str, analysis: dict) -> None:
     get_redis_client().set(get_analysis_cache_key(transcript_object_name), json.dumps(analysis))
+
+
+def load_cached_llm_roles(transcript_object_name: str) -> dict | None:
+    cached_value = get_redis_client().get(get_llm_roles_cache_key(transcript_object_name))
+    if not cached_value:
+        return None
+    return json.loads(cached_value)
+
+
+def save_cached_llm_roles(transcript_object_name: str, roles: dict) -> None:
+    get_redis_client().set(get_llm_roles_cache_key(transcript_object_name), json.dumps(roles))
 
 
 def ensure_analysis_table_exists() -> None:
@@ -247,6 +291,68 @@ def save_analysis_to_postgres(payload: dict, analysis_object_name: str, analysis
             )
 
 
+def build_llm_role_prompt(transcript: dict) -> str:
+    utterances = transcript.get("utterances") or []
+    sample_lines = []
+    for utterance in utterances[:12]:
+        sample_lines.append(f"Speaker {utterance.get('speaker')}: {utterance.get('text', '')}")
+    joined_lines = "\n".join(sample_lines)
+    return (
+        "You are analyzing a psychology or therapy session transcript.\n"
+        "Decide which diarized speaker label is the therapist and which is the patient.\n"
+        "Return only valid JSON with this exact shape:\n"
+        '{"therapist_speaker":"A","patient_speaker":"B","confidence":"high","reasoning":"short explanation"}\n'
+        "If uncertain, still provide your best guess.\n"
+        "Transcript sample:\n"
+        f"{joined_lines}"
+    )
+
+
+def identify_roles_with_gemini(transcript_object_name: str, transcript: dict) -> dict:
+    cached_roles = load_cached_llm_roles(transcript_object_name)
+    if cached_roles is not None:
+        logger.info("Using cached Gemini role assignment for %s", transcript_object_name)
+        return cached_roles
+
+    client = get_gemini_client()
+    models_to_try = ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
+    last_error: Exception | None = None
+
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=build_llm_role_prompt(transcript),
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=SpeakerRoles,
+                ),
+            )
+            if getattr(response, "parsed", None):
+                roles = dict(response.parsed)
+            elif response.text:
+                try:
+                    roles = json.loads(response.text)
+                except json.JSONDecodeError as exc:
+                    raise GeminiAnalysisError(f"Gemini returned invalid JSON: {response.text}") from exc
+            else:
+                raise GeminiAnalysisError("Gemini returned an empty response")
+
+            save_cached_llm_roles(transcript_object_name, roles)
+            logger.info("Built and cached Gemini role assignment for %s using %s", transcript_object_name, model_name)
+            return roles
+        except errors.APIError as exc:
+            last_error = exc
+            logger.warning("Gemini API error with model %s: %s", model_name, exc)
+            if getattr(exc, "status_code", None) and int(exc.status_code) >= 500:
+                continue
+            raise GeminiAnalysisError(f"Gemini API error: {exc}") from exc
+        except Exception as exc:
+            last_error = exc
+            raise GeminiAnalysisError(f"Gemini role assignment failed: {exc}") from exc
+    raise TemporaryGeminiAnalysisError(f"Gemini models unavailable: {last_error}")
+
+
 def main() -> None:
     queue_name = os.getenv("TRANSCRIPT_CREATED_QUEUE", "transcript_created")
 
@@ -281,6 +387,9 @@ def main() -> None:
                         analysis = build_basic_analysis(transcript)
                         save_cached_analysis(payload["transcript_object_name"], analysis)
                         logger.info("Built and cached basic analysis: %s", analysis["summary"])
+                    roles = identify_roles_with_gemini(payload["transcript_object_name"], transcript)
+                    analysis["speaker_roles"] = roles
+                    logger.info("Gemini role assignment: %s", roles)
                     analysis_object_name = upload_analysis(
                         bucket_name=payload["bucket"],
                         transcript_object_name=payload["transcript_object_name"],
@@ -294,7 +403,9 @@ def main() -> None:
                     S3Error,
                     KeyError,
                     json.JSONDecodeError,
+                    GeminiAnalysisError,
                     OSError,
+                    TemporaryGeminiAnalysisError,
                     psycopg.Error,
                     redis.RedisError,
                 ) as exc:

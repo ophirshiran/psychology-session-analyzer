@@ -91,6 +91,7 @@ services:
       POSTGRES_DB: psychology
       POSTGRES_USER: psychology
       POSTGRES_PASSWORD: psychology
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     volumes:
       - ./services/analysis_worker:/app
 
