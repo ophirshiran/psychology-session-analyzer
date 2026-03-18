@@ -60,6 +60,7 @@ services:
       MINIO_SECRET_KEY: minioadmin
       MINIO_SECURE: "false"
       TRANSCRIPTION_WORKER_DOWNLOAD_DIR: /tmp/transcription_worker
+      ASSEMBLYAI_API_KEY: ${ASSEMBLYAI_API_KEY:-}
     volumes:
       - ./services/transcription_worker:/app
 
