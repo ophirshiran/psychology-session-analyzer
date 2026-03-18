@@ -72,6 +72,7 @@ services:
       - rabbitmq
       - minio
       - redis
+      - postgres
     environment:
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: "5672"
@@ -85,6 +86,11 @@ services:
       ANALYSIS_WORKER_DOWNLOAD_DIR: /tmp/analysis_worker
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: psychology
+      POSTGRES_USER: psychology
+      POSTGRES_PASSWORD: psychology
     volumes:
       - ./services/analysis_worker:/app
 

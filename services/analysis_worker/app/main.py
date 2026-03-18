@@ -9,6 +9,7 @@ from pathlib import Path
 from minio import Minio
 from minio.error import S3Error
 import pika
+import psycopg
 import redis
 
 
@@ -68,6 +69,17 @@ def get_redis_client() -> redis.Redis:
         host=os.getenv("REDIS_HOST", "redis"),
         port=int(os.getenv("REDIS_PORT", "6379")),
         decode_responses=True,
+    )
+
+
+def get_postgres_connection() -> psycopg.Connection:
+    return psycopg.connect(
+        host=os.getenv("POSTGRES_HOST", "postgres"),
+        port=int(os.getenv("POSTGRES_PORT", "5432")),
+        dbname=os.getenv("POSTGRES_DB", "psychology"),
+        user=os.getenv("POSTGRES_USER", "psychology"),
+        password=os.getenv("POSTGRES_PASSWORD", "psychology"),
+        autocommit=True,
     )
 
 
@@ -169,11 +181,78 @@ def save_cached_analysis(transcript_object_name: str, analysis: dict) -> None:
     get_redis_client().set(get_analysis_cache_key(transcript_object_name), json.dumps(analysis))
 
 
+def ensure_analysis_table_exists() -> None:
+    with get_postgres_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS analysis_results (
+                    transcript_object_name TEXT PRIMARY KEY,
+                    transcript_id TEXT,
+                    source_object_name TEXT NOT NULL,
+                    audio_object_name TEXT NOT NULL,
+                    analysis_object_name TEXT NOT NULL,
+                    dominant_speaker TEXT,
+                    utterance_count INTEGER NOT NULL,
+                    speaker_count INTEGER NOT NULL,
+                    analysis_json JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+
+
+def save_analysis_to_postgres(payload: dict, analysis_object_name: str, analysis: dict) -> None:
+    summary = analysis["summary"]
+    with get_postgres_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO analysis_results (
+                    transcript_object_name,
+                    transcript_id,
+                    source_object_name,
+                    audio_object_name,
+                    analysis_object_name,
+                    dominant_speaker,
+                    utterance_count,
+                    speaker_count,
+                    analysis_json
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                ON CONFLICT (transcript_object_name)
+                DO UPDATE SET
+                    transcript_id = EXCLUDED.transcript_id,
+                    source_object_name = EXCLUDED.source_object_name,
+                    audio_object_name = EXCLUDED.audio_object_name,
+                    analysis_object_name = EXCLUDED.analysis_object_name,
+                    dominant_speaker = EXCLUDED.dominant_speaker,
+                    utterance_count = EXCLUDED.utterance_count,
+                    speaker_count = EXCLUDED.speaker_count,
+                    analysis_json = EXCLUDED.analysis_json,
+                    updated_at = NOW()
+                """,
+                (
+                    payload["transcript_object_name"],
+                    payload.get("transcript_id"),
+                    payload["source_object_name"],
+                    payload["audio_object_name"],
+                    analysis_object_name,
+                    summary.get("dominant_speaker"),
+                    summary["utterance_count"],
+                    summary["speaker_count"],
+                    json.dumps(analysis),
+                ),
+            )
+
+
 def main() -> None:
     queue_name = os.getenv("TRANSCRIPT_CREATED_QUEUE", "transcript_created")
 
     while True:
         try:
+            ensure_analysis_table_exists()
             connection = get_connection()
             channel = connection.channel()
             channel.queue_declare(queue=queue_name, durable=True)
@@ -208,15 +287,24 @@ def main() -> None:
                         analysis=analysis,
                     )
                     logger.info("Uploaded analysis JSON to %s", analysis_object_name)
+                    save_analysis_to_postgres(payload, analysis_object_name, analysis)
+                    logger.info("Saved analysis metadata to Postgres for %s", payload["transcript_object_name"])
                     ch.basic_ack(delivery_tag=method.delivery_tag)
-                except (S3Error, KeyError, json.JSONDecodeError, OSError, redis.RedisError) as exc:
+                except (
+                    S3Error,
+                    KeyError,
+                    json.JSONDecodeError,
+                    OSError,
+                    psycopg.Error,
+                    redis.RedisError,
+                ) as exc:
                     logger.error("Failed to process transcript JSON: %s", exc)
                     ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
 
             channel.basic_consume(queue=queue_name, on_message_callback=callback)
             channel.start_consuming()
-        except pika.exceptions.AMQPError as exc:
-            logger.warning("RabbitMQ not ready yet: %s. Retrying in 5 seconds.", exc)
+        except (pika.exceptions.AMQPError, psycopg.Error) as exc:
+            logger.warning("Analysis worker not ready yet: %s. Retrying in 5 seconds.", exc)
             time.sleep(5)
 
 
