@@ -65,6 +65,20 @@ services:
     volumes:
       - ./services/transcription_worker:/app
 
+  analysis_worker:
+    build: ./services/analysis_worker
+    container_name: psychology-analysis-worker
+    depends_on:
+      - rabbitmq
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: guest
+      TRANSCRIPT_CREATED_QUEUE: transcript_created
+    volumes:
+      - ./services/analysis_worker:/app
+
   rabbitmq:
     image: rabbitmq:3-management
     container_name: psychology-rabbitmq
