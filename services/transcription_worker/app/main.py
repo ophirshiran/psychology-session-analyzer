@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import time
+from io import BytesIO
 from pathlib import Path
 
 import httpx
@@ -54,6 +55,36 @@ def download_audio(bucket_name: str, audio_object_name: str) -> str:
     client = get_minio_client()
     client.fget_object(bucket_name, audio_object_name, str(local_path))
     return str(local_path)
+
+
+def upload_transcript(bucket_name: str, audio_object_name: str, transcript: dict) -> str:
+    transcript_object_name = f"transcripts/{Path(audio_object_name).stem}.json"
+    transcript_bytes = json.dumps(transcript, ensure_ascii=True, indent=2).encode("utf-8")
+    client = get_minio_client()
+    client.put_object(
+        bucket_name=bucket_name,
+        object_name=transcript_object_name,
+        data=BytesIO(transcript_bytes),
+        length=len(transcript_bytes),
+        content_type="application/json",
+    )
+    return transcript_object_name
+
+
+def publish_transcript_created_event(
+    channel: pika.adapters.blocking_connection.BlockingChannel,
+    payload: dict,
+) -> None:
+    queue_name = os.getenv("TRANSCRIPT_CREATED_QUEUE", "transcript_created")
+    channel.queue_declare(queue=queue_name, durable=True)
+    message = json.dumps(payload).encode("utf-8")
+    channel.basic_publish(
+        exchange="",
+        routing_key=queue_name,
+        body=message,
+        properties=pika.BasicProperties(delivery_mode=2),
+    )
+    logger.info("Published transcript.created event for %s", payload["transcript_object_name"])
 
 
 def get_assemblyai_api_key() -> str:
@@ -149,6 +180,7 @@ def log_transcript_preview(transcript: dict) -> None:
 
 def main() -> None:
     queue_name = os.getenv("AUDIO_EXTRACTED_QUEUE", "audio_extracted")
+    transcript_created_queue = os.getenv("TRANSCRIPT_CREATED_QUEUE", "transcript_created")
 
     while True:
         try:
@@ -156,6 +188,7 @@ def main() -> None:
             connection = get_connection()
             channel = connection.channel()
             channel.queue_declare(queue=queue_name, durable=True)
+            channel.queue_declare(queue=transcript_created_queue, durable=True)
             channel.basic_qos(prefetch_count=1)
             logger.info("Connected to RabbitMQ. Waiting for messages in queue '%s'.", queue_name)
 
@@ -175,6 +208,24 @@ def main() -> None:
                     logger.info("Downloaded extracted audio to %s", local_path)
                     transcript = transcribe_audio(local_path)
                     log_transcript_preview(transcript)
+                    transcript_object_name = upload_transcript(
+                        bucket_name=payload["bucket"],
+                        audio_object_name=payload["audio_object_name"],
+                        transcript=transcript,
+                    )
+                    logger.info("Uploaded transcript JSON to %s", transcript_object_name)
+                    publish_transcript_created_event(
+                        ch,
+                        {
+                            "event_type": "transcript.created",
+                            "bucket": payload["bucket"],
+                            "source_object_name": payload["source_object_name"],
+                            "audio_object_name": payload["audio_object_name"],
+                            "transcript_object_name": transcript_object_name,
+                            "transcript_id": transcript.get("id"),
+                            "filename": payload["filename"],
+                        },
+                    )
                     ch.basic_ack(delivery_tag=method.delivery_tag)
                 except PermanentTranscriptionError as exc:
                     logger.error("Permanent transcription failure: %s", exc)

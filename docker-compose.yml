@@ -55,6 +55,7 @@ services:
       RABBITMQ_USER: guest
       RABBITMQ_PASSWORD: guest
       AUDIO_EXTRACTED_QUEUE: audio_extracted
+      TRANSCRIPT_CREATED_QUEUE: transcript_created
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
