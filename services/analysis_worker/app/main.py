@@ -57,6 +57,9 @@ STOPWORDS = {
     "your",
 }
 
+POSITIVE_EMOTIONS = {"calm", "comfortable", "hopeful", "positive", "relieved", "safe", "supported"}
+NEGATIVE_EMOTIONS = {"anxious", "awkward", "conflicted", "embarrassed", "frustrated", "sad", "stressed", "uncomfortable", "upset", "worried"}
+
 
 class GeminiAnalysisError(Exception):
     pass
@@ -461,6 +464,47 @@ def tag_utterances_with_gemini(transcript_object_name: str, transcript: dict, ro
     raise TemporaryGeminiAnalysisError(f"Gemini tagging models unavailable: {last_error}")
 
 
+def build_recommendations(sample_tags: list[dict]) -> dict:
+    patient_tags = [tag for tag in sample_tags if tag.get("speaker_role") == "patient"]
+    positive_topics = []
+    negative_topics = []
+
+    for tag in patient_tags:
+        topic = tag.get("topic", "")
+        emotion = tag.get("emotion", "").lower()
+        if not topic:
+            continue
+        topic_entry = {
+            "topic": topic,
+            "emotion": tag.get("emotion", ""),
+            "text": tag.get("text", ""),
+        }
+        if emotion in NEGATIVE_EMOTIONS:
+            negative_topics.append(topic_entry)
+        elif emotion in POSITIVE_EMOTIONS:
+            positive_topics.append(topic_entry)
+
+    recommendations = []
+    if negative_topics:
+        recommendations.append(
+            "Explore the patient's negative topics in more depth and ask follow-up questions about what triggers them."
+        )
+    if positive_topics:
+        recommendations.append(
+            "Revisit the patient's positive topics and ask what helps those moments feel safer or more manageable."
+        )
+    if not recommendations:
+        recommendations.append(
+            "Continue gathering more detail from the patient before making strong topic-based recommendations."
+        )
+
+    return {
+        "positive_patient_topics": positive_topics[:3],
+        "negative_patient_topics": negative_topics[:3],
+        "therapist_recommendations": recommendations,
+    }
+
+
 def main() -> None:
     queue_name = os.getenv("TRANSCRIPT_CREATED_QUEUE", "transcript_created")
 
@@ -507,6 +551,8 @@ def main() -> None:
                     logger.info("Gemini sample tags count: %s", len(sample_tags))
                     if sample_tags:
                         logger.info("Gemini first sample tag: %s", sample_tags[0])
+                    analysis["recommendations"] = build_recommendations(sample_tags)
+                    logger.info("Therapist recommendations: %s", analysis["recommendations"]["therapist_recommendations"])
                     analysis_object_name = upload_analysis(
                         bucket_name=payload["bucket"],
                         transcript_object_name=payload["transcript_object_name"],
